@@ -11,27 +11,49 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-async function connectDB() {
-  try {
-    const connection = await mysql.createConnection({
-      host: process.env.DB_HOST,
-      user: process.env.DB_USER,
-      password: process.env.DB_PASSWORD,
-      port: parseInt(process.env.DB_PORT),
-      database: process.env.DB_NAME,
-    });
-    console.log('Conectado ao banco de dados MySQL');
-    return connection;
-  } catch (err) {
-    console.error('Erro ao conectar ao banco de dados:', err);
-    throw err;
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  port: parseInt(process.env.DB_PORT),
+  database: process.env.DB_NAME,
+  connectionLimit: 10,
+});
+
+async function getConnection(maxRetries = 3, retryDelay = 5000) {
+  let retries = 0;
+  while (retries <= maxRetries) {
+    try {
+      return await pool.getConnection();
+    } catch (err) {
+      console.error(
+        `Erro ao obter conexão (tentativa ${retries + 1}/${maxRetries}):`,
+        err
+      );
+      retries++;
+
+      if (retries > maxRetries) {
+        throw new Error('Falha ao obter conexão após múltiplas tentativas');
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+    }
+  }
+}
+
+// Função para liberar uma conexão de volta ao pool
+function releaseConnection(connection) {
+  if (connection) {
+    connection.release();
   }
 }
 
 async function main() {
   try {
-    let db = await connectDB();
-    
+    const testConnection = await getConnection();
+    console.log('Conectado ao banco de dados MySQL');
+    releaseConnection(testConnection);
+
     app.get('/', (req, res) => {
       res.send('Bem-vindo ao meu servidor!');
     });
@@ -39,17 +61,20 @@ async function main() {
     app.post('/submit', async (req, res) => {
       const { name, school, dob, phone, prize } = req.body;
 
-      // // Validação básica dos campos
-      // if (!name || !school || !dob || !phone || !prize) {
-      //   return res.status(400).json({ message: 'Todos os campos são obrigatórios' });
-      // }
-
       try {
-        const [result] = await db.execute(
+        const connection = await getConnection();
+
+        const [result] = await connection.execute(
           'INSERT INTO sweepstake (name, school, dob, phone, prize) VALUES (?, ?, ?, ?, ?)',
           [name, school, dob, phone, prize]
         );
-        res.status(201).json({ message: 'Dados inseridos com sucesso', id: result.insertId });
+
+        releaseConnection(connection);
+
+        res.status(201).json({
+          message: 'Dados inseridos com sucesso',
+          id: result.insertId,
+        });
       } catch (err) {
         console.error('Erro ao inserir dados:', err);
         res.status(500).json({ message: 'Erro ao inserir dados' });
